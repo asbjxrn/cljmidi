@@ -13,18 +13,14 @@
 	  :vendor (.getVendor device)
 	  :version (.getVersion device)
 	  :description (.getDescription device)
-	  :device-info device})
+	  :device (. MidiSystem getMidiDevice device)})
        (. MidiSystem getMidiDeviceInfo)))
 
-(defn filter-mididevices [class devices]
+(defn filter-mididevices [class device-infos]
   "returns a list of midi devices of the Class class from a map of midi devices"
   (filter (fn [device-info]
-	    (try 
-	     (let [device (. MidiSystem getMidiDevice 
-			     (:device-info device-info))]
-	       (instance? class device))
-	     (catch MidiUnavailableException e)))
-	  devices))
+	    (instance? class (:device device-info)))
+	  device-infos))
 
 (def midi-shortmessage-status {ShortMessage/ACTIVE_SENSING :active-sensing
                                ShortMessage/CONTINUE :continue
@@ -63,34 +59,39 @@ representing the high and low parts of a 14 bit value."
   (bit-or (bit-and lower 0x7f)
     (bit-shift-left (bit-and higher 0x7f) 7)))
 
-(defn decode-midi-command [status command data1 data2]
+(defn- decode-midi-command 
+  "Takes the data of a midi-command and returns a hashmap of the message"
+  [command channel data1 data2]
   (cond (#{:note-on :note-off} command)
-    {:status status :command command :key (keyname data1)
-     :octave (mod data1 12) :velocity data2}
-    (#{:channel-pressure :poly-pressure} command)
-    {:status status :command command :key (keyname data1) 
-     :octave (mod data1 10) :pressure data2}
-    (= :control-change command)
-    {:status status :command command :change data1  :value data2}
-    (= :program-change command)
-    {:status status :command command :change data1}
-    (= :pitch-bend command)
-    {:status status :command command :change (calculate-14-bit-value data1 data2)}))
+	{:command command :channel channel :key (keyname data1)
+	 :octave (mod data1 12) :velocity data2}
+
+	(#{:channel-pressure :poly-pressure} command)
+	{:command command :channel channel :key (keyname data1) 
+	 :octave (mod data1 12) :pressure data2}
+
+	(= :control-change command)
+	{:command command :channel channel :change data1 :value data2}
+
+	(= :program-change command)
+	{:command command :chanel channel :change data1}
+
+	(= :pitch-bend command)
+	{:command command :channel channel
+	 :change (calculate-14-bit-value data1 data2)}))
 
 (defmulti decode-midi-message class)
 (defmethod decode-midi-message javax.sound.midi.ShortMessage [message]
   (let [status (midi-shortmessage-status (. message getStatus))
         command (midi-shortmessage-command (. message getCommand))
+        channel (inc (. message getChannel))
         data1 (. message getData1)
         data2 (. message getData2)]
-    (cond command
-      (decode-midi-command status command data1 data2)
-      status
-      {:status status}
-      :else
-      {:unknown-status (. message getStatus)
-       :unknown-command (. message getCommand)
-       :byte1 data1 :byte2 data2})))
+    (cond command (decode-midi-command command channel data1 data2)
+	  status  {:status status}
+	  :else	  {:unknown-status (. message getStatus)
+		   :unknown-command (. message getCommand)
+		   :byte1 data1 :byte2 data2})))
 
 (defmethod decode-midi-message SysexMessage [message]
   (let [bytes (. message getData)]
@@ -101,10 +102,10 @@ representing the high and low parts of a 14 bit value."
   "Sets up a callback to f with a map representing a midi message"
   [transmitter f]
   (let [receiver (proxy [Receiver] []
-    (close [] nil)
-    (send [message timestamp]
-      (f (assoc (decode-midi-message message)
-        :timestamp timestamp))))]
+		   (close [] nil)
+		   (send [message timestamp]
+			 (f (assoc (decode-midi-message message)
+		    	           :timestamp timestamp))))]
     (. transmitter setReceiver receiver)
     (. transmitter open)
     transmitter))
@@ -115,12 +116,12 @@ all incoming messages into a ref to a sequence. Returns the ref"
   [transmitter]
   (let [midi-data (ref ())
         receiver (proxy [Receiver] []
-      (close [] nil)
-      (send [message timestamp]
-        (dosync
-          (alter midi-data
-            conj (assoc (decode-midi-message message)
-            :timestamp timestamp)))))]
+		   (close [] nil)
+		   (send [message timestamp]
+			 (dosync
+			  (alter midi-data
+				 conj (assoc (decode-midi-message message)
+					:timestamp timestamp)))))]
     (. transmitter setReceiver receiver)
     (. transmitter open)
     midi-data))
@@ -135,32 +136,9 @@ arrives from the transmitter"
                            :timing-clock-queue []
                            :last-message-timestamp 0})]
     (midi-input-callback transmitter
-      (fn [message-map]
-        (send midi-agent handler-function message-map)))
+			 (fn [message-map]
+			   (send midi-agent handler-function message-map)))
     midi-agent))
-
-(defn handle-midi-message [agent message]
-  "This is the main function that will be sent to the agent when a new  midi
-message arrives"
-  (cond (= (:status message) :timing-clock)
-        (if (= 23 (count (agent :timing-clock-queue)))
-          (assoc agent
-            :bpm (int (/ 60000000 (max 1 (- (:timestamp message) (:beat-stamp agent)))))
-            :beat-stamp (:timestamp message)
-            :beat-gap (- (:timestamp message) (:beat-stamp agent))
-            :timing-clock-queue []
-            :last-message-timestamp (:timestamp message))
-          (assoc agent
-            :timing-clock-queue (conj (agent :timing-clock-queue) message)
-            :last-message-timestamp (:timestamp message)))
-        (and (#{:note-on :note-off} (:command message))
-             (< 0 (:velocity message)))
-        (assoc agent
-          :last-message-timestamp (:timestamp message)
-          :messages (conj (agent :messages) message))
-        :else
-        (assoc agent
-          :last-message-timestamp (:timestamp message))))
 
 (defn flush-old-midi-messages
   "removes all messages from the agents message queue older than the timestamp"
@@ -168,23 +146,7 @@ message arrives"
   (assoc agent
     :messages (filter #(< timestamp (:timestamp %)) (:messages agent))))
 
-(defn messages-as-strings
-  "Returns a sequence of strings representing the messages stored in the agent"
-  [agent]
-  (map #(apply str (interleave (repeat " ")
-                               (map % [:timestamp :key :octave :velocity])))
-      (agent :messages)))
-
-(defn print-messages [agent]
-  "Simple dump of the messages stored in the agent.
-For debugging at the REPL."
-   (doseq [mess (messages-as-strings agent)]
-     (println mess)))
-
 (defn get-time 
-  "get a timestamp from the midi-agent microsecond resolution"
-  [midi-agent]
-  (let [ts (. #^Transmitter (midi-agent :transmitter) getMicrosecondPosition)]
-              (if (= -1 ts)
-                (midi-agent :last-message-timestamp)
-                ts)))
+  "get a timestamp from the device"
+  [device]
+  (. device getMicrosecondPosition))
