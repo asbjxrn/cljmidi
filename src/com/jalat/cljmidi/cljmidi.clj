@@ -6,27 +6,25 @@
 			     MidiMessage ShortMessage SysexMessage MetaMessage)))
 
 (defn get-mididevices
-  "Returns a hash of mididevice info hashes."
+  "Returns a list of hashes with info about the midi devices available."
   []
-  (reduce (fn [m device]
-    (assoc m (.hashCode device)
-      {:name (.getName device)
-       :vendor (.getVendor device)
-       :version (.getVersion device)
-       :description (.getDescription device)
-       :device-info device}))
-    {}
-    (. MidiSystem getMidiDeviceInfo)))
+  (map (fn [device]
+	 {:name (.getName device)
+	  :vendor (.getVendor device)
+	  :version (.getVersion device)
+	  :description (.getDescription device)
+	  :device-info device})
+       (. MidiSystem getMidiDeviceInfo)))
 
-(defn filter-devices [class devices]
+(defn filter-mididevices [class devices]
   "returns a list of midi devices of the Class class from a map of midi devices"
-  (into {}
-    (filter (fn [device-info]
-      (try (let [device (. MidiSystem getMidiDevice (:device-info
-        (second device-info)))]
-        (instance? class device))
-        (catch MidiUnavailableException e)))
-      devices)))
+  (filter (fn [device-info]
+	    (try 
+	     (let [device (. MidiSystem getMidiDevice 
+			     (:device-info device-info))]
+	       (instance? class device))
+	     (catch MidiUnavailableException e)))
+	  devices))
 
 (def midi-shortmessage-status {ShortMessage/ACTIVE_SENSING :active-sensing
                                ShortMessage/CONTINUE :continue
