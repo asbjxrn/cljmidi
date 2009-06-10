@@ -64,11 +64,11 @@ representing the high and low parts of a 14 bit value."
   [command channel data1 data2]
   (cond (#{:note-on :note-off} command)
 	{:command command :channel channel :key (keyname data1)
-	 :octave (mod data1 12) :velocity data2}
-
+	 :octave (int (/ data1 12)) :velocity data2}
+	
 	(#{:channel-pressure :poly-pressure} command)
 	{:command command :channel channel :key (keyname data1) 
-	 :octave (mod data1 12) :pressure data2}
+	 :octave (int (/ data1 12)) :pressure data2}
 
 	(= :control-change command)
 	{:command command :channel channel :change data1 :value data2}
